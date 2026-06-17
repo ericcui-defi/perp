@@ -22,7 +22,6 @@ pub struct OpenPosition<'info> {
     #[account(mut, address = market.vault)]
     pub vault: Account<'info, TokenAccount>,
     
-
     #[account(mut, token::mint = vault.mint, token::authority = user)]
     pub user_token_account: Account<'info, TokenAccount>,
 
@@ -34,6 +33,7 @@ pub fn handler(ctx: Context<OpenPosition>, size: i64, collateral_amount: u64) ->
     
     // Validation
     require!(size != 0, PerpError::ZeroPositionSize);
+    require!(collateral_amount > 0, PerpError::ZeroCollateral);
 
     let cpi = CpiContext::new(
         ctx.accounts.token_program.key(),
@@ -46,9 +46,19 @@ pub fn handler(ctx: Context<OpenPosition>, size: i64, collateral_amount: u64) ->
     token::transfer(cpi, collateral_amount)?;
 
     let position = &mut ctx.accounts.position;
+    position.bump = ctx.bumps.position;
+    position.owner = ctx.accounts.user.key();
     position.collateral = collateral_amount;
     position.size = size;
     position.entry_price = ctx.accounts.oracle.price;
     position.funding_snapshot = ctx.accounts.market.cumulative_funding;
+
+    let market = &mut ctx.accounts.market;
+    if size > 0 {
+        market.open_interest_long = market.open_interest_long.checked_add(size as u64).unwrap();
+    } else {
+        market.open_interest_short = market.open_interest_short.checked_add(size.unsigned_abs()).unwrap();
+    }
+
     Ok(())
 }

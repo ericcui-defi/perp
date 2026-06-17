@@ -24,11 +24,10 @@ pub mod perp {
     pub fn update_price(ctx: Context<UpdatePrice>, update_price: u64) -> Result<()> {
         update_price::handler(ctx, update_price)
     }
-    pub fn open_position(
-        ctx: Context<OpenPosition>,
-        size: i64,
-        collateral_amount: u64,
-    ) -> Result<()> {
+    pub fn open_position(ctx: Context<OpenPosition>, size: i64, collateral_amount: u64) -> Result<()> {
         open_position::handler(ctx, size, collateral_amount)
+    }
+    pub fn close_position(ctx: Context<ClosePosition>) -> Result<()> {
+        close_position::handler(ctx)
     }
 }

@@ -15,6 +15,9 @@ pub enum PerpError {
     #[msg("Position size must be nonzero")]
     ZeroPositionSize,
 
-    #[msg("Collaterla amount must be nonzero")]
-    ZeroCollateral
+    #[msg("Collateral amount must be nonzero")]
+    ZeroCollateral,
+
+    #[msg("Incorrect field value")]
+    IncorrectFieldValue,
 }
