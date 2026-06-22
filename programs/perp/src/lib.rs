@@ -30,4 +30,7 @@ pub mod perp {
     pub fn close_position(ctx: Context<ClosePosition>) -> Result<()> {
         close_position::handler(ctx)
     }
+    pub fn crank_funding(ctx: Context<CrankFunding>) -> Result<()> {
+        crank_funding::handler(ctx)
+    }
 }

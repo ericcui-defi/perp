@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use crate::state::Market;
+use crate::state::{Market, PriceFeed};
 use anchor_spl::token::{Mint, Token, TokenAccount};
 use crate::constants::*;
 
@@ -23,8 +23,9 @@ pub struct InitializeMarket<'info> {
     #[account(init, payer = payer, token::mint = usdc_mint, token::authority = vault_authority, seeds = [VAULT_SEED],bump)]
     pub vault: Account<'info, TokenAccount>,
 
-    /// CHECK: Pyth feed address; captured into Market for future validation
-    pub oracle: UncheckedAccount<'info>,
+    // Typed PriceFeed: Anchor verifies discriminator + ownership, so the market can't be
+    // initialized with a bogus oracle (random pubkey, account from another program, etc).
+    pub oracle: Account<'info, PriceFeed>,
 
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
@@ -40,5 +41,6 @@ pub fn handler(ctx: Context<InitializeMarket>) -> Result<()> {
     market.cumulative_funding = 0;
     market.open_interest_long = 0;
     market.open_interest_short = 0;
+    market.last_funding_ts = Clock::get()?.unix_timestamp;
     Ok(())
 }

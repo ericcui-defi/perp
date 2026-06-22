@@ -54,7 +54,9 @@ pub fn handler(ctx: Context<ClosePosition>) -> Result<()> {
 
     let payout_signed = collateral as i128 + pnl - funding_owed;
     require!(payout_signed >= 0, PerpError::Bankrupt);
-    let payout = payout_signed as u64;
+    // Bound-check before casting. Without this, a wildly profitable position could compute
+    // a payout above u64::MAX and silently truncate to a wrong value via `as u64`.
+    let payout = u64::try_from(payout_signed).map_err(|_| PerpError::PayoutOverflow)?;
 
     // Token CPI: vault -> user, signed by vault_authority PDA.
     let vault_auth_bump = ctx.bumps.vault_authority;

@@ -20,4 +20,10 @@ pub enum PerpError {
 
     #[msg("Incorrect field value")]
     IncorrectFieldValue,
+
+    #[msg("Price must be greater than zero")]
+    InvalidPrice,
+
+    #[msg("Payout exceeds u64 range")]
+    PayoutOverflow,
 }

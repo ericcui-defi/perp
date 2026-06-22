@@ -10,6 +10,7 @@ pub struct Market {
     pub cumulative_funding: i128,
     pub open_interest_long: u64,
     pub open_interest_short: u64,
+    pub last_funding_ts: i64,
 }
 
 #[account]

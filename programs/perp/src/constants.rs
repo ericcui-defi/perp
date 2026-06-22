@@ -20,3 +20,6 @@ pub const VAULT_SEED: &[u8] = b"vault";
 
 #[constant]
 pub const PRICE_FEED_SEED: &[u8] = b"price_feed";
+
+#[constant]
+pub const FUNDING_RATE_DIVISOR: i64 = 100_000_000;

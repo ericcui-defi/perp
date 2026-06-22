@@ -93,4 +93,8 @@ fn test_initialize() {
     assert_eq!(m.oracle, price_feed);
     assert_eq!(m.vault, vault);
     assert_eq!(m.cumulative_funding, 0);
+    // last_funding_ts gets stamped to the Clock at init — first crank's dt starts from here.
+    // LiteSVM's clock starts at 0, so we just confirm the field was written (default i64 is 0,
+    // so this is a weak check — the meaningful coverage lives in the crank tests downstream).
+    assert!(m.last_funding_ts >= 0);
 }
