@@ -23,3 +23,9 @@ pub const PRICE_FEED_SEED: &[u8] = b"price_feed";
 
 #[constant]
 pub const FUNDING_RATE_DIVISOR: i64 = 100_000_000;
+
+#[constant]
+pub const MAINTENANCE_MARGIN_BPS: u64 = 500;
+
+#[constant]
+pub const LIQUIDATION_REWARD_BPS: u64 = 100;

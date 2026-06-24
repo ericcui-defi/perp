@@ -20,6 +20,7 @@ struct TestCtx {
     svm: LiteSVM,
     program_id: Pubkey,
     payer: Keypair,
+    usdc_mint: Pubkey,
     price_feed: Pubkey,
     market: Pubkey,
     vault: Pubkey,
@@ -89,6 +90,7 @@ fn setup_with_funded_user(initial_price: u64, mint_amount: u64) -> TestCtx {
         svm,
         program_id,
         payer,
+        usdc_mint,
         price_feed,
         market,
         vault,
@@ -155,6 +157,56 @@ fn close_ix(ctx: &TestCtx) -> Instruction {
         }
         .to_account_metas(None),
     )
+}
+
+fn liquidate_ix(
+    ctx: &TestCtx,
+    liquidator: Pubkey,
+    liquidator_token_account: Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        ctx.program_id,
+        &perp::instruction::LiquidatePosition {}.data(),
+        perp::accounts::LiquidatePosition {
+            liquidator,
+            owner: ctx.payer.pubkey(),
+            market: ctx.market,
+            position: ctx.position,
+            oracle: ctx.price_feed,
+            vault: ctx.vault,
+            vault_authority: ctx.vault_authority,
+            liquidator_token_account,
+            token_program: TOKEN_ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// Mint a fresh liquidator keypair, fund it with SOL for tx fees, and give it an empty
+/// USDC token account. The `payer` (main test wallet) pays for the ATA creation so the
+/// liquidator starts with exactly 0 USDC — any post-liquidation balance is the reward.
+fn create_liquidator(ctx: &mut TestCtx) -> (Keypair, Pubkey) {
+    let liquidator = Keypair::new();
+    ctx.svm.airdrop(&liquidator.pubkey(), 1_000_000_000).unwrap();
+    let liquidator_token_account = CreateAssociatedTokenAccount::new(
+        &mut ctx.svm,
+        &ctx.payer,
+        &ctx.usdc_mint,
+    )
+    .owner(&liquidator.pubkey())
+    .send()
+    .unwrap();
+    (liquidator, liquidator_token_account)
+}
+
+fn token_balance(ctx: &TestCtx, token_account: &Pubkey) -> u64 {
+    get_spl_account::<spl_token::state::Account>(&ctx.svm, token_account)
+        .unwrap()
+        .amount
+}
+
+fn sol_balance(ctx: &TestCtx, pubkey: &Pubkey) -> u64 {
+    ctx.svm.get_account(pubkey).map(|a| a.lamports).unwrap_or(0)
 }
 
 fn crank_ix(ctx: &TestCtx) -> Instruction {
@@ -499,4 +551,268 @@ fn back_to_back_crank_is_noop() {
     let m_after_second = read_market(&ctx);
     assert_eq!(m_after_second.cumulative_funding, m_after_first.cumulative_funding);
     assert_eq!(m_after_second.last_funding_ts, m_after_first.last_funding_ts);
+}
+
+// -------- liquidation tests --------
+
+/// Underwater long, called by a permissionless liquidator.
+///
+/// Open 1 SOL long at $100 with 20 USDC collateral. Drop oracle to $84.
+/// At $84:
+///   equity   = 20_000_000 + (-16_000_000) = 4_000_000
+///   notional = 84_000_000
+///   threshold = 84_000_000 * 500 / 10_000 = 4_200_000
+///   4_000_000 < 4_200_000 → liquidatable.
+///
+/// Expected:
+///   target_reward = 20_000_000 * 100 / 10_000 = 200_000  (1% of collateral)
+///   available     = max(equity, 0) = 4_000_000
+///   reward        = min(target_reward, available) = 200_000  (= $0.20)
+///
+/// Position is closed (`close = liquidator` in the accounts struct), so the liquidator
+/// receives the position rent in SOL on top of the USDC reward, and OI returns to (0, 0).
+#[test]
+fn liquidate_underwater_long_succeeds() {
+    let mut ctx = setup_with_funded_user(100_000_000, 100_000_000);
+
+    let ix = open_ix(&ctx, 1_000_000_000, 20_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+    assert_eq!(market_oi(&ctx), (1_000_000_000, 0));
+
+    let ix = update_price_ix(&ctx, 84_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let (liquidator, liq_ata) = create_liquidator(&mut ctx);
+    let liq_sol_before = sol_balance(&ctx, &liquidator.pubkey());
+    assert_eq!(token_balance(&ctx, &liq_ata), 0);
+
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    send(&mut ctx.svm, &liquidator, &[ix]).unwrap();
+
+    // USDC reward landed.
+    assert_eq!(token_balance(&ctx, &liq_ata), 200_000);
+    // Position closed and OI decremented.
+    assert_eq!(market_oi(&ctx), (0, 0));
+    assert!(ctx.svm.get_account(&ctx.position).map_or(true, |a| a.data.is_empty()));
+    // Rent flowed to the liquidator. Liquidator paid one tx fee, but the rent recovered
+    // from the closed position dwarfs that, so net SOL must be strictly higher.
+    assert!(sol_balance(&ctx, &liquidator.pubkey()) > liq_sol_before);
+}
+
+/// Underwater short. Mirror of the long case across the entry price.
+///
+/// Open 1 SOL SHORT at $100 with 20 USDC collateral. Pump oracle to $115.
+/// At $115:
+///   equity   = 20_000_000 + (-1e9) * (115e6 - 100e6) / 1e9 = 20_000_000 - 15_000_000 = 5_000_000
+///   notional = 1e9 * 115e6 / 1e9 = 115_000_000
+///   threshold = 115_000_000 * 500 / 10_000 = 5_750_000
+///   5_000_000 < 5_750_000 → liquidatable.
+///
+///   target_reward = 200_000, available = 5_000_000, reward = 200_000.
+#[test]
+fn liquidate_underwater_short_succeeds() {
+    let mut ctx = setup_with_funded_user(100_000_000, 100_000_000);
+
+    let ix = open_ix(&ctx, -1_000_000_000, 20_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+    assert_eq!(market_oi(&ctx), (0, 1_000_000_000));
+
+    let ix = update_price_ix(&ctx, 115_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let (liquidator, liq_ata) = create_liquidator(&mut ctx);
+
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    send(&mut ctx.svm, &liquidator, &[ix]).unwrap();
+
+    assert_eq!(token_balance(&ctx, &liq_ata), 200_000);
+    assert_eq!(market_oi(&ctx), (0, 0));
+    assert!(ctx.svm.get_account(&ctx.position).map_or(true, |a| a.data.is_empty()));
+}
+
+/// A still-healthy long must not be liquidatable. Tests the strict `<` inequality of
+/// the threshold check from the safe side: equity sits above MM × notional.
+///
+/// At $85:
+///   equity   = 20_000_000 - 15_000_000 = 5_000_000
+///   threshold = 85_000_000 * 500 / 10_000 = 4_250_000
+///   5_000_000 < 4_250_000 → false. NotLiquidatable.
+///
+/// Position must stay untouched: no USDC paid out, no OI change, no account close.
+#[test]
+fn liquidate_healthy_long_reverts() {
+    let mut ctx = setup_with_funded_user(100_000_000, 100_000_000);
+
+    let ix = open_ix(&ctx, 1_000_000_000, 20_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let ix = update_price_ix(&ctx, 85_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let (liquidator, liq_ata) = create_liquidator(&mut ctx);
+
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    let err = send(&mut ctx.svm, &liquidator, &[ix]).unwrap_err();
+    let err_str = format!("{:?}", err.err);
+    // Anchor custom-error code 0x1778 = 6008 = PerpError::NotLiquidatable.
+    assert!(
+        err_str.contains("NotLiquidatable")
+            || err_str.contains("0x1778")
+            || err_str.contains("6008"),
+        "expected NotLiquidatable error, got: {err_str}",
+    );
+
+    assert_eq!(token_balance(&ctx, &liq_ata), 0);
+    assert_eq!(market_oi(&ctx), (1_000_000_000, 0));
+    let pos_acct = ctx.svm.get_account(&ctx.position).unwrap();
+    assert!(!pos_acct.data.is_empty());
+}
+
+/// Symmetric guard on the short side. At $113, short is losing but still healthy.
+///
+/// At $113:
+///   equity   = 20_000_000 - (-1e9 * (113e6 - 100e6) / 1e9) = 20_000_000 - 13_000_000 = 7_000_000
+///   threshold = 113_000_000 * 500 / 10_000 = 5_650_000
+///   7_000_000 < 5_650_000 → false. NotLiquidatable.
+#[test]
+fn liquidate_healthy_short_reverts() {
+    let mut ctx = setup_with_funded_user(100_000_000, 100_000_000);
+
+    let ix = open_ix(&ctx, -1_000_000_000, 20_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let ix = update_price_ix(&ctx, 113_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let (liquidator, liq_ata) = create_liquidator(&mut ctx);
+
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    let err = send(&mut ctx.svm, &liquidator, &[ix]).unwrap_err();
+    let err_str = format!("{:?}", err.err);
+    assert!(
+        err_str.contains("NotLiquidatable")
+            || err_str.contains("0x1778")
+            || err_str.contains("6008"),
+        "expected NotLiquidatable error, got: {err_str}",
+    );
+
+    assert_eq!(token_balance(&ctx, &liq_ata), 0);
+    assert_eq!(market_oi(&ctx), (0, 1_000_000_000));
+}
+
+/// At entry price, equity = collateral = 20 USDC (way above the $5 threshold). Liquidation
+/// must revert. Guards against a regression where the equity formula drops `collateral`
+/// (we shipped that bug earlier in this very file before catching it).
+#[test]
+fn liquidate_unmoved_position_reverts() {
+    let mut ctx = setup_with_funded_user(100_000_000, 100_000_000);
+
+    let ix = open_ix(&ctx, 1_000_000_000, 20_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let (liquidator, liq_ata) = create_liquidator(&mut ctx);
+
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    let err = send(&mut ctx.svm, &liquidator, &[ix]).unwrap_err();
+    let err_str = format!("{:?}", err.err);
+    assert!(
+        err_str.contains("NotLiquidatable")
+            || err_str.contains("0x1778")
+            || err_str.contains("6008"),
+        "expected NotLiquidatable error, got: {err_str}",
+    );
+}
+
+/// Deeply underwater: equity has already gone negative. Liquidation must still succeed
+/// (the protocol absolutely wants the position closed), but the USDC reward clamps to 0
+/// because `available = max(equity, 0) = 0`. The liquidator's only compensation is the
+/// position rent — which is the worst-case incentive design point.
+///
+/// At $50:
+///   equity   = 20_000_000 + (-50_000_000) = -30_000_000  (insolvent)
+///   notional = 50_000_000
+///   threshold = 2_500_000
+///   -30_000_000 < 2_500_000 → liquidatable.
+///
+///   target_reward = 200_000, available = 0, reward = 0.
+#[test]
+fn liquidate_bankrupt_long_pays_zero_token_reward() {
+    let mut ctx = setup_with_funded_user(100_000_000, 100_000_000);
+
+    let ix = open_ix(&ctx, 1_000_000_000, 20_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let ix = update_price_ix(&ctx, 50_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let (liquidator, liq_ata) = create_liquidator(&mut ctx);
+    let liq_sol_before = sol_balance(&ctx, &liquidator.pubkey());
+
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    send(&mut ctx.svm, &liquidator, &[ix]).unwrap();
+
+    // Zero USDC reward — there was nothing positive to pay from.
+    assert_eq!(token_balance(&ctx, &liq_ata), 0);
+    // Position still closed and OI cleaned up.
+    assert_eq!(market_oi(&ctx), (0, 0));
+    assert!(ctx.svm.get_account(&ctx.position).map_or(true, |a| a.data.is_empty()));
+    // Rent still flows: keepers stay incentivized to clean up bankrupt positions.
+    assert!(sol_balance(&ctx, &liquidator.pubkey()) > liq_sol_before);
+}
+
+/// Funding integration: a position that's healthy at the current mark price can become
+/// liquidatable after enough funding accrues against it. Proves that `funding_owed` is
+/// in the equity formula on the liquidation path — not just the close path.
+///
+/// At mark $86 immediately after open, position is healthy:
+///   equity   = 20_000_000 - 14_000_000 = 6_000_000
+///   threshold = 86_000_000 * 500 / 10_000 = 4_300_000
+///   not liquidatable.
+///
+/// Advance dt = 2_500_000s, crank. With OI = 1 SOL fully long:
+///   delta = 1e9 * 86e6 * 2_500_000 / (1e9 * 1e8) = 2_150_000
+///   funding_owed at close = 1e9 * 2_150_000 / 1e9 = 2_150_000
+///   new equity = 6_000_000 - 2_150_000 = 3_850_000
+///   3_850_000 < 4_300_000 → now liquidatable.
+#[test]
+fn funding_makes_borderline_position_liquidatable() {
+    let mut ctx = setup_with_funded_user(100_000_000, 100_000_000);
+
+    let ix = open_ix(&ctx, 1_000_000_000, 20_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let ix = update_price_ix(&ctx, 86_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let (liquidator, liq_ata) = create_liquidator(&mut ctx);
+
+    // Confirm healthy first — equity 6.0 USDC vs threshold 4.3 USDC.
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    let err = send(&mut ctx.svm, &liquidator, &[ix]).unwrap_err();
+    let err_str = format!("{:?}", err.err);
+    assert!(
+        err_str.contains("NotLiquidatable")
+            || err_str.contains("0x1778")
+            || err_str.contains("6008"),
+        "expected NotLiquidatable before funding accrual, got: {err_str}",
+    );
+
+    // Warp ~29 days and crank. Cumulative funding accumulates a positive delta because
+    // skew is fully long, so the long position owes funding.
+    let m = read_market(&ctx);
+    set_clock_ts(&mut ctx.svm, m.last_funding_ts + 2_500_000);
+    ctx.svm.expire_blockhash();
+    let ix = crank_ix(&ctx);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+    assert_eq!(read_market(&ctx).cumulative_funding, 2_150_000);
+
+    // Same mark, but funding_owed of 2.15 USDC has eroded the cushion. Now liquidatable.
+    ctx.svm.expire_blockhash();
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    send(&mut ctx.svm, &liquidator, &[ix]).unwrap();
+
+    assert_eq!(market_oi(&ctx), (0, 0));
+    assert!(ctx.svm.get_account(&ctx.position).map_or(true, |a| a.data.is_empty()));
+    // Reward = min(200_000, max(3_850_000, 0)) = 200_000.
+    assert_eq!(token_balance(&ctx, &liq_ata), 200_000);
 }

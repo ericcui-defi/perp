@@ -26,4 +26,7 @@ pub enum PerpError {
 
     #[msg("Payout exceeds u64 range")]
     PayoutOverflow,
+
+    #[msg("Not liquidatable")]
+    NotLiquidatable,
 }

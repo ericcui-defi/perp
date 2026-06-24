@@ -33,4 +33,7 @@ pub mod perp {
     pub fn crank_funding(ctx: Context<CrankFunding>) -> Result<()> {
         crank_funding::handler(ctx)
     }
+    pub fn liquidate_position(ctx: Context<LiquidatePosition>) -> Result<()> {
+        liquidate_position::handler(ctx)
+    }
 }
