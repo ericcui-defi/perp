@@ -36,4 +36,7 @@ pub mod perp {
     pub fn liquidate_position(ctx: Context<LiquidatePosition>) -> Result<()> {
         liquidate_position::handler(ctx)
     }
+    pub fn add_collateral(ctx: Context<AddCollateral>, amount: u64) -> Result<()> {
+        add_collateral::handler(ctx, amount)
+    }
 }

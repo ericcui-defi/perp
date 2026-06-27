@@ -58,6 +58,7 @@ pub fn handler(ctx: Context<LiquidatePosition>) -> Result<()> {
     let notional = (size.unsigned_abs() as i128 * mark as i128) / BASE_SCALE as i128;
     let threshold = (notional * MAINTENANCE_MARGIN_BPS as i128) / 10_000;
 
+    // Liquidation instruction wrongly initiated
     require!(margin < threshold, PerpError::NotLiquidatable);
 
     // Calculate liquidation reward
