@@ -39,4 +39,7 @@ pub mod perp {
     pub fn add_collateral(ctx: Context<AddCollateral>, amount: u64) -> Result<()> {
         add_collateral::handler(ctx, amount)
     }
+    pub fn deposit_insurance(ctx: Context<DepositInsurance>, amount: u64) -> Result<()> {
+        deposit_insurance::handler(ctx, amount)
+    }
 }

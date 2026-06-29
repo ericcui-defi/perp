@@ -29,3 +29,6 @@ pub const MAINTENANCE_MARGIN_BPS: u64 = 500;
 
 #[constant]
 pub const LIQUIDATION_REWARD_BPS: u64 = 100;
+
+#[constant]
+pub const INSURANCE_FUND_SEED: &[u8] = b"insurance_fund";

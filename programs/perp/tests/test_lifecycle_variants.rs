@@ -8,7 +8,10 @@ use litesvm::types::{FailedTransactionMetadata, TransactionMetadata};
 use litesvm_token::{
     get_spl_account, spl_token, CreateAssociatedTokenAccount, CreateMint, MintTo, TOKEN_ID,
 };
-use perp::{MARKET_SEED, POSITION_SEED, PRICE_FEED_SEED, VAULT_AUTHORITY_SEED, VAULT_SEED};
+use perp::{
+    INSURANCE_FUND_SEED, MARKET_SEED, POSITION_SEED, PRICE_FEED_SEED, VAULT_AUTHORITY_SEED,
+    VAULT_SEED,
+};
 use solana_keypair::Keypair;
 use solana_message::{Message, VersionedMessage};
 use solana_signer::Signer;
@@ -24,6 +27,7 @@ struct TestCtx {
     price_feed: Pubkey,
     market: Pubkey,
     vault: Pubkey,
+    insurance_fund: Pubkey,
     vault_authority: Pubkey,
     user_token_account: Pubkey,
     position: Pubkey,
@@ -41,6 +45,7 @@ fn setup_with_funded_user(initial_price: u64, mint_amount: u64) -> TestCtx {
     let (market, _) = Pubkey::find_program_address(&[MARKET_SEED], &program_id);
     let (vault_authority, _) = Pubkey::find_program_address(&[VAULT_AUTHORITY_SEED], &program_id);
     let (vault, _) = Pubkey::find_program_address(&[VAULT_SEED], &program_id);
+    let (insurance_fund, _) = Pubkey::find_program_address(&[INSURANCE_FUND_SEED], &program_id);
     let (position, _) =
         Pubkey::find_program_address(&[POSITION_SEED, payer.pubkey().as_ref()], &program_id);
 
@@ -67,6 +72,7 @@ fn setup_with_funded_user(initial_price: u64, mint_amount: u64) -> TestCtx {
             usdc_mint,
             vault_authority,
             vault,
+            insurance_fund,
             oracle: price_feed,
             system_program: system_program::ID,
             token_program: TOKEN_ID,
@@ -94,6 +100,7 @@ fn setup_with_funded_user(initial_price: u64, mint_amount: u64) -> TestCtx {
         price_feed,
         market,
         vault,
+        insurance_fund,
         vault_authority,
         user_token_account,
         position,
@@ -174,6 +181,7 @@ fn liquidate_ix(
             position: ctx.position,
             oracle: ctx.price_feed,
             vault: ctx.vault,
+            insurance_fund: ctx.insurance_fund,
             vault_authority: ctx.vault_authority,
             liquidator_token_account,
             token_program: TOKEN_ID,

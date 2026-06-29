@@ -20,8 +20,11 @@ pub struct InitializeMarket<'info> {
     #[account(seeds = [VAULT_AUTHORITY_SEED], bump)]
     pub vault_authority: UncheckedAccount<'info>,
 
-    #[account(init, payer = payer, token::mint = usdc_mint, token::authority = vault_authority, seeds = [VAULT_SEED],bump)]
+    #[account(init, payer = payer, token::mint = usdc_mint, token::authority = vault_authority, seeds = [VAULT_SEED], bump)]
     pub vault: Account<'info, TokenAccount>,
+
+    #[account(init, payer = payer, token::mint = usdc_mint, token::authority = vault_authority, seeds = [INSURANCE_FUND_SEED], bump)]
+    pub insurance_fund: Account<'info, TokenAccount>,
 
     // Typed PriceFeed: Anchor verifies discriminator + ownership, so the market can't be
     // initialized with a bogus oracle (random pubkey, account from another program, etc).
@@ -38,6 +41,7 @@ pub fn handler(ctx: Context<InitializeMarket>) -> Result<()> {
     market.authority = ctx.accounts.payer.key();
     market.oracle = ctx.accounts.oracle.key();
     market.vault = ctx.accounts.vault.key();
+    market.insurance_fund = ctx.accounts.insurance_fund.key();
     market.cumulative_funding = 0;
     market.open_interest_long = 0;
     market.open_interest_short = 0;

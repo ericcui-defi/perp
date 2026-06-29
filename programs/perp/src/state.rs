@@ -7,6 +7,7 @@ pub struct Market {
     pub authority: Pubkey,
     pub oracle: Pubkey,
     pub vault: Pubkey,
+    pub insurance_fund: Pubkey,
     pub cumulative_funding: i128,
     pub open_interest_long: u64,
     pub open_interest_short: u64,

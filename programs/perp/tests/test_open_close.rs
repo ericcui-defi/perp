@@ -5,7 +5,7 @@ use anchor_lang::system_program;
 use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
 use litesvm::LiteSVM;
 use litesvm_token::{CreateAssociatedTokenAccount, CreateMint, MintTo, TOKEN_ID, get_spl_account, spl_token};
-use perp::{MARKET_SEED, POSITION_SEED, PRICE_FEED_SEED, VAULT_AUTHORITY_SEED, VAULT_SEED};
+use perp::{INSURANCE_FUND_SEED, MARKET_SEED, POSITION_SEED, PRICE_FEED_SEED, VAULT_AUTHORITY_SEED, VAULT_SEED};
 use solana_keypair::Keypair;
 use solana_message::{Message, VersionedMessage};
 use solana_signer::Signer;
@@ -56,6 +56,10 @@ fn test_open() {
         &[VAULT_SEED],
         &program_id
     );
+    let (insurance_fund, _) = Pubkey::find_program_address(
+        &[INSURANCE_FUND_SEED],
+        &program_id
+    );
 
     // Create the USDC mint via litesvm-token's CreateMint builder.
     // Internally: allocates the mint keypair, runs create_account + initialize_mint2,
@@ -74,6 +78,7 @@ fn test_open() {
             usdc_mint: usdc_mint,
             vault_authority: vault_authority,
             vault: vault,
+            insurance_fund: insurance_fund,
             oracle: price_feed,
             system_program: system_program::ID,
             token_program: TOKEN_ID,
@@ -195,6 +200,10 @@ fn test_close() {
         &[VAULT_SEED],
         &program_id
     );
+    let (insurance_fund, _) = Pubkey::find_program_address(
+        &[INSURANCE_FUND_SEED],
+        &program_id
+    );
 
     // Create the USDC mint via litesvm-token's CreateMint builder.
     // Internally: allocates the mint keypair, runs create_account + initialize_mint2,
@@ -213,6 +222,7 @@ fn test_close() {
             usdc_mint: usdc_mint,
             vault_authority: vault_authority,
             vault: vault,
+            insurance_fund: insurance_fund,
             oracle: price_feed,
             system_program: system_program::ID,
             token_program: TOKEN_ID,

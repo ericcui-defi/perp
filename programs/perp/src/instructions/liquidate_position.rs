@@ -28,6 +28,9 @@ pub struct LiquidatePosition<'info> {
     #[account(mut, address = market.vault)]
     pub vault: Account<'info, TokenAccount>,
 
+    #[account(mut, address = market.insurance_fund)]
+    pub insurance_fund: Account<'info, TokenAccount>,
+
     /// CHECK: Phantom signing PDA. No data; identity verified by seeds + bump.
     #[account(seeds = [VAULT_AUTHORITY_SEED], bump)]
     pub vault_authority: UncheckedAccount<'info>,
@@ -61,16 +64,37 @@ pub fn handler(ctx: Context<LiquidatePosition>) -> Result<()> {
     // Liquidation instruction wrongly initiated
     require!(margin < threshold, PerpError::NotLiquidatable);
 
+    let vault_auth_bump = ctx.bumps.vault_authority;
+    let signer_seeds: &[&[&[u8]]] = &[&[VAULT_AUTHORITY_SEED, &[vault_auth_bump]]];
+
     // Calculate liquidation reward
     // Reward is 1% of the trader's collateral, but capped at remaining positive equity
     // so a deeply-bankrupt position can't pay out more than is actually in the vault for it.
     let target_reward = (collateral as i128 * LIQUIDATION_REWARD_BPS as i128) / 10_000;
-    let available = margin.max(0);
-    let liquidation_reward = target_reward.min(available) as u64;
+    let mut liquidation_reward = target_reward as u64;
 
+    // Checking for negative margin and pulling from insurance fund if in the red
+    if margin < 0 {
+
+        // Calculate pull
+        let pull = ctx.accounts.insurance_fund.amount.min(margin.unsigned_abs() as u64 + liquidation_reward);
+
+        // Transfer deficit amount from insurance fund to market vault
+        let cpi = CpiContext::new_with_signer(
+            ctx.accounts.token_program.key(),
+            Transfer {
+                from: ctx.accounts.insurance_fund.to_account_info(),
+                to: ctx.accounts.vault.to_account_info(),
+                authority: ctx.accounts.vault_authority.to_account_info(),
+            },
+            signer_seeds,
+        );
+        token::transfer(cpi, pull)?;
+
+        liquidation_reward = pull.saturating_sub(margin.unsigned_abs() as u64);
+    }
+    
     // Transfer liquidation reward to liquidator ATA
-    let vault_auth_bump = ctx.bumps.vault_authority;
-    let signer_seeds: &[&[&[u8]]] = &[&[VAULT_AUTHORITY_SEED, &[vault_auth_bump]]];
     let cpi = CpiContext::new_with_signer(
         ctx.accounts.token_program.key(),
         Transfer{
