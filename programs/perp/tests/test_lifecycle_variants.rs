@@ -166,6 +166,21 @@ fn close_ix(ctx: &TestCtx) -> Instruction {
     )
 }
 
+fn deposit_insurance_ix(ctx: &TestCtx, amount: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        ctx.program_id,
+        &perp::instruction::DepositInsurance { amount }.data(),
+        perp::accounts::DepositInsurance {
+            user: ctx.payer.pubkey(),
+            market: ctx.market,
+            insurance_fund: ctx.insurance_fund,
+            user_token_account: ctx.user_token_account,
+            token_program: TOKEN_ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
 fn liquidate_ix(
     ctx: &TestCtx,
     liquidator: Pubkey,
@@ -823,4 +838,145 @@ fn funding_makes_borderline_position_liquidatable() {
     assert!(ctx.svm.get_account(&ctx.position).map_or(true, |a| a.data.is_empty()));
     // Reward = min(200_000, max(3_850_000, 0)) = 200_000.
     assert_eq!(token_balance(&ctx, &liq_ata), 200_000);
+}
+
+// -------- Insurance-fund-funded liquidation paths --------
+//
+// All four tests share the same bankrupt setup:
+//   1 SOL long at $100, $20 collateral, price drops to $50.
+//   equity   = 20 + 1*(50-100) = -30  (bankrupt)
+//   notional = 50, threshold = 2.5    (liquidatable)
+//   target_reward = 0.01 * 20         = 0.2 USDC = 200_000
+//   deficit  = 30 USDC                = 30_000_000
+// What differs across them is how much sits in the insurance fund at liquidation time.
+
+/// Bankrupt position with insurance fund holding more than `deficit + target_reward`.
+/// Insurance covers both the bankruptcy gap and the keeper reward; liquidator paid in full.
+#[test]
+fn bankrupt_with_funded_insurance_pays_full_reward() {
+    let mut ctx = setup_with_funded_user(100_000_000, 200_000_000);
+
+    let ix = open_ix(&ctx, 1_000_000_000, 20_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let ix = deposit_insurance_ix(&ctx, 100_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+    assert_eq!(token_balance(&ctx, &ctx.insurance_fund), 100_000_000);
+
+    let ix = update_price_ix(&ctx, 50_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let (liquidator, liq_ata) = create_liquidator(&mut ctx);
+    let liq_sol_before = sol_balance(&ctx, &liquidator.pubkey());
+
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    send(&mut ctx.svm, &liquidator, &[ix]).unwrap();
+
+    // Insurance drained by deficit (30M) + target_reward (200K) = 30_200_000.
+    assert_eq!(token_balance(&ctx, &ctx.insurance_fund), 100_000_000 - 30_200_000);
+    // Keeper gets the full target reward.
+    assert_eq!(token_balance(&ctx, &liq_ata), 200_000);
+    // Position cleaned up.
+    assert_eq!(market_oi(&ctx), (0, 0));
+    assert!(ctx.svm.get_account(&ctx.position).map_or(true, |a| a.data.is_empty()));
+    assert!(sol_balance(&ctx, &liquidator.pubkey()) > liq_sol_before);
+}
+
+/// Insurance has exactly the deficit and nothing more. `pull == deficit`, so the
+/// `pull.saturating_sub(deficit)` yields 0 and the keeper gets no USDC reward
+/// (rent still flows). Locks in the saturating_sub behaviour.
+#[test]
+fn bankrupt_with_exact_deficit_insurance_pays_no_reward() {
+    let mut ctx = setup_with_funded_user(100_000_000, 200_000_000);
+
+    let ix = open_ix(&ctx, 1_000_000_000, 20_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let ix = deposit_insurance_ix(&ctx, 30_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let ix = update_price_ix(&ctx, 50_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let (liquidator, liq_ata) = create_liquidator(&mut ctx);
+    let liq_sol_before = sol_balance(&ctx, &liquidator.pubkey());
+
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    send(&mut ctx.svm, &liquidator, &[ix]).unwrap();
+
+    // Insurance fully drained.
+    assert_eq!(token_balance(&ctx, &ctx.insurance_fund), 0);
+    // No USDC reward — pull == deficit so the saturating_sub yields 0.
+    assert_eq!(token_balance(&ctx, &liq_ata), 0);
+    assert_eq!(market_oi(&ctx), (0, 0));
+    assert!(ctx.svm.get_account(&ctx.position).map_or(true, |a| a.data.is_empty()));
+    // Rent still flows — keepers stay incentivised to clear the position even
+    // when there's no USDC reward.
+    assert!(sol_balance(&ctx, &liquidator.pubkey()) > liq_sol_before);
+}
+
+/// Insurance holds less than the deficit. The pull drains insurance entirely and
+/// the residual deficit becomes silent bad debt in the vault (untracked — that's
+/// a Phase 5 concern). Critical property: liquidation must STILL succeed, because
+/// the alternative is a permanent toxic position no keeper can clear.
+#[test]
+fn bankrupt_with_insufficient_insurance_closes_with_bad_debt() {
+    let mut ctx = setup_with_funded_user(100_000_000, 200_000_000);
+
+    let ix = open_ix(&ctx, 1_000_000_000, 20_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    // 10M < deficit of 30M.
+    let ix = deposit_insurance_ix(&ctx, 10_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let ix = update_price_ix(&ctx, 50_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let (liquidator, liq_ata) = create_liquidator(&mut ctx);
+    let liq_sol_before = sol_balance(&ctx, &liquidator.pubkey());
+
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    send(&mut ctx.svm, &liquidator, &[ix]).unwrap();
+
+    // Insurance fully drained.
+    assert_eq!(token_balance(&ctx, &ctx.insurance_fund), 0);
+    // No reward — pull (10M) < deficit (30M) so saturating_sub yields 0.
+    assert_eq!(token_balance(&ctx, &liq_ata), 0);
+    // Position MUST be closed even when insurance is short — otherwise it becomes
+    // a permanent unliquidatable obligation.
+    assert_eq!(market_oi(&ctx), (0, 0));
+    assert!(ctx.svm.get_account(&ctx.position).map_or(true, |a| a.data.is_empty()));
+    assert!(sol_balance(&ctx, &liquidator.pubkey()) > liq_sol_before);
+}
+
+/// Positive-equity (healthy-margin) liquidation does NOT touch the insurance fund.
+/// Owner's own collateral in the vault covers the keeper reward. Regression guard
+/// for the insurance drain being conditional on `margin < 0`.
+#[test]
+fn healthy_liquidation_does_not_touch_insurance_fund() {
+    let mut ctx = setup_with_funded_user(100_000_000, 200_000_000);
+
+    let ix = open_ix(&ctx, 1_000_000_000, 20_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    // Pre-fund insurance so a silent draw would be visible.
+    let ix = deposit_insurance_ix(&ctx, 50_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+    let insurance_before = token_balance(&ctx, &ctx.insurance_fund);
+
+    // At $84: equity = 4_000_000 (positive), threshold = 4_200_000 → liquidatable
+    // but margin is NOT bankrupt.
+    let ix = update_price_ix(&ctx, 84_000_000);
+    send(&mut ctx.svm, &ctx.payer, &[ix]).unwrap();
+
+    let (liquidator, liq_ata) = create_liquidator(&mut ctx);
+    let ix = liquidate_ix(&ctx, liquidator.pubkey(), liq_ata);
+    send(&mut ctx.svm, &liquidator, &[ix]).unwrap();
+
+    // Insurance untouched.
+    assert_eq!(token_balance(&ctx, &ctx.insurance_fund), insurance_before);
+    // Keeper paid the full target reward out of the vault.
+    assert_eq!(token_balance(&ctx, &liq_ata), 200_000);
+    assert_eq!(market_oi(&ctx), (0, 0));
 }
